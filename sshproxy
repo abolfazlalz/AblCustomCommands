@@ -1,0 +1,161 @@
+#!/usr/bin/env python
+
+import os
+import subprocess
+import re
+import sys
+import platform
+from os import path
+
+CONFIG_FILE = 'config.conf'
+
+host = "localhost"
+port = 1188
+config = {}
+
+
+def load_config():
+    if not path.isfile(CONFIG_FILE):
+        print('Config file does not set')
+        exit()
+    with open(CONFIG_FILE) as file:
+        for line in file.readlines():
+            sp = line.split('=')
+            if len(sp) != 2:
+                print("Invalid config file format")
+                exit()
+            config[sp[0]] = sp[1].strip()
+
+
+load_config()
+
+keys = ['user', 'host', 'port']
+
+
+def save_config():
+    with open(CONFIG_FILE, 'w') as file:
+        lines = []
+        for key in config.keys():
+            value = config[key]
+            lines.append("%s=%s\n" % (key, value))
+        file.writelines(lines)
+
+
+def get_config(key):
+    if key not in config:
+        print("\"%s\" does not set in config file" % key)
+        exit()
+    return config[key]
+
+
+def available_networks():
+    output = subprocess.check_output(
+        ['networksetup', '-listallnetworkservices']).decode().split('\n')
+    return output[1:len(output) - 1]
+
+
+def check_proxy():
+    output = subprocess.check_output(
+        ["/usr/sbin/scutil", '--proxy']).decode("utf-8")
+    x = re.search("SOCKSEnable : (\d)", output).groups()
+    if len(x) == 0 or x[0] != "1":
+        return False
+    host = re.search("SOCKSProxy : (.*)", output).groups()[0]
+    port = re.search("SOCKSPort : (.*)", output).groups()[0]
+
+    return port == str(port) and host in ['localhost', '127.0.0.1', host]
+
+
+def proxy_off():
+    for network in available_networks():
+        os.system(
+            '/usr/sbin/networksetup -setsocksfirewallproxystate "%s" off' % network)
+
+
+def proxy_on():
+    for network in available_networks():
+        os.system("/usr/sbin/networksetup -setsocksfirewallproxy \"%s\" %s %d" %
+                  (network, host, port))
+
+
+def open_ssh_tunnel():
+    user = get_config('sshproxy_user')
+    server_host = get_config('sshproxy_host')
+    server_port = int(get_config('sshproxy_port'))
+    os.system("ssh -fNMS /tmp/sshtunnel -D %d %s@%s -p%d" %
+              (port, user, server_host, server_port))
+
+
+def close_ssh_tunnel():
+    server_host = get_config('sshproxy_host')
+    server_port = int(get_config('sshproxy_port'))
+    os.system('ssh -S /tmp/sshtunnel -O exit %s -p%d' %
+              (server_host, server_port))
+
+
+if platform.system() != 'Darwin':
+    print("This operating system is not supported.")
+    exit()
+
+commands = "c = Connect\nd = Disconnect\ns = Status"
+
+if (len(sys.argv) == 1):
+    i = '-' + input('%s\nCommand: ' % commands)
+else:
+    i = sys.argv[1]
+
+
+if i == '-c' or i == 'connect':
+    print("Connecting")
+    open_ssh_tunnel()
+    proxy_on()
+    print("Connected !")
+
+elif i == 'set':
+    if len(sys.argv) != 4:
+        print("Not enough parameters.")
+        exit()
+    key = sys.argv[2]
+    value = sys.argv[3]
+    if key not in keys:
+        print(key, "is invalid key for config.")
+        exit()
+    config['sshproxy_' + key] = value
+    save_config()
+    print("Key has updated.")
+
+elif i == 'get':
+    if len(sys.argv) != 3:
+        print("Not enough parameters.")
+        exit()
+    key = sys.argv[2]
+    if key not in keys:
+        print(key, 'is invalid key for config.')
+        exit()
+    key = "sshproxy_" + key
+    if key not in config:
+        print(key, 'does not set.')
+        exit()
+    print(config[key])
+
+elif i == '-d':
+    print("Disconnecting")
+    proxy_off()
+    close_ssh_tunnel()
+    print("Disconnected")
+
+elif i == '-r':
+    print("Reconnecting...")
+    close_ssh_tunnel()
+    open_ssh_tunnel()
+    proxy_on()
+    print("Reconnected")
+
+elif i == '-s':
+    print("Proxy is connected:", check_proxy())
+
+elif i == '-h' or i == '--help':
+    print("Usage SSHProxy [OPTIONS]\n\nOptions:\n\t-c\tConnect to defined ssh server\n\t-d\tDisconnect from connected ssh server\n\t-s\tCheck ssh proxy vpn status\n\tset\tSet key for in file")
+
+else:
+    print("%s is not a sshproxy command.\nSee 'sshproxy --help' or 'sshproxy -h'" % (i))
